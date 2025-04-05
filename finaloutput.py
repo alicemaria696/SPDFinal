@@ -1,5 +1,4 @@
 import os
-import mysql.connector
 import hashlib
 import gradio as gr
 import google.generativeai as genai
@@ -23,14 +22,6 @@ import signal
 load_dotenv(find_dotenv())
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
-# MySQL database configuration
-MYSQL_CONFIG = {
-    "host": "localhost",
-    "user": "devuser",
-    "password": "dev@user1",
-    "database": "chatbot_db"
-}
-
 # Global state management
 class ChatState:
     def __init__(self):
@@ -45,9 +36,6 @@ class ChatState:
     def update_history(self, user_input, ai_response):
         with self.lock:
             self.history.append((user_input, ai_response))
-            # Save to database if user is logged in
-            if self.current_user:
-                save_chat_to_db(self.current_user, user_input, ai_response)
             
     def get_history(self):
         with self.lock:
@@ -69,97 +57,6 @@ class ChatState:
 chat_state = ChatState()
 response_queue = queue.Queue()
 audio_lock = threading.Lock()
-
-# Database functions
-def get_db_connection():
-    return mysql.connector.connect(**MYSQL_CONFIG)
-
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def db_register_user(username, password, email):
-    try:
-        password_hash = hash_password(password)
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO users (username, password_hash, email) VALUES (%s, %s, %s)",
-            (username, password_hash, email)
-        )
-        conn.commit()
-        return "Registration successful! You can now log in.", True
-    except mysql.connector.Error as err:
-        return "Username already exists." if err.errno == 1062 else f"Database error: {err}", False
-    finally:
-        cursor.close()
-        conn.close()
-
-def db_login_user(username, password):
-    try:
-        password_hash = hash_password(password)
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, username FROM users WHERE username = %s AND password_hash = %s",
-            (username, password_hash))
-        result = cursor.fetchone()
-        if result:
-            chat_state.current_user = result[1]  # Store username in chat state
-            # Load previous chat history for this user
-            load_chat_history(result[1])
-            return ("Login successful!", True)
-        return ("Invalid credentials", False)
-    except mysql.connector.Error as err:
-        return f"Database error: {err}", False
-    finally:
-        cursor.close()
-        conn.close()
-
-def save_chat_to_db(username, user_message, assistant_message):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        # Save combined message to match your schema
-        if user_message and assistant_message:
-            combined_content = f"User: {user_message} Assistant: {assistant_message}"
-            cursor.execute(
-                "INSERT INTO chat_history (username, chat_content) VALUES (%s, %s)",
-                (username, combined_content)
-            )
-            conn.commit()
-    except mysql.connector.Error as err:
-        print(f"Error saving chat to DB: {err}")
-    finally:
-        cursor.close()
-        conn.close()
-
-def load_chat_history(username):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(
-            "SELECT chat_content, timestamp FROM chat_history WHERE username = %s ORDER BY timestamp ASC",
-            (username,)
-        )
-        history = []
-        
-        for row in cursor.fetchall():
-            content = row['chat_content']
-            # Parse the combined message format "User: ... Assistant: ..."
-            if "User:" in content and "Assistant:" in content:
-                user_part, assistant_part = content.split("Assistant:", 1)
-                user_message = user_part.replace("User:", "").strip()
-                assistant_message = assistant_part.strip()
-                history.append((user_message, assistant_message))
-        
-        with chat_state.lock:
-            chat_state.history = history
-            
-    except mysql.connector.Error as err:
-        print(f"Error loading chat history: {err}")
-    finally:
-        cursor.close()
-        conn.close()
 
 # AI and Media functions
 model = genai.GenerativeModel('gemini-2.0-flash')
@@ -387,17 +284,12 @@ def main_app():
         with gr.Column(visible=True) as auth_col:
             with gr.Tabs() as auth_tabs:
                 with gr.TabItem("Register"):
-                    reg_user = gr.Textbox(label="Username")
-                    reg_pass = gr.Textbox(label="Password", type="password")
-                    reg_email = gr.Textbox(label="Email")
+                    gr.Markdown("Click the register button to continue")
                     reg_btn = gr.Button("Register", variant="primary")
-                    reg_status = gr.Textbox(label="Status", interactive=False)
 
                 with gr.TabItem("Login"):
-                    login_username = gr.Textbox(label="Username")
-                    login_password = gr.Textbox(label="Password", type="password")
+                    gr.Markdown("Click the login button to continue")
                     login_btn = gr.Button("Login", variant="primary")
-                    login_status = gr.Textbox(label="Status", interactive=False)
 
         # Chat Interface
         with gr.Column(visible=False) as chat_col:
@@ -447,31 +339,12 @@ def main_app():
             [voice_btn, chatbot]
         )
 
-        # Registration Logic
-        def register(u, p, e):
-            msg, success = db_register_user(u, p, e)
-            if success:
-                return msg, "", "", "", gr.Tabs.update(selected="Login")
-            return msg, u, p, e, gr.Tabs.update()
+        # Dummy registration/login logic that just shows the chat interface
+        def show_chat():
+            return gr.update(visible=False), gr.update(visible=True)
         
-        reg_btn.click(
-            register,
-            [reg_user, reg_pass, reg_email],
-            [reg_status, reg_user, reg_pass, reg_email, auth_tabs]
-        )
-
-        # Login Logic
-        def handle_login(u, p):
-            msg, success = db_login_user(u, p)
-            if success:
-                return msg, gr.update(visible=False), gr.update(visible=True)
-            return msg, gr.update(visible=True), gr.update(visible=False)
-        
-        login_btn.click(
-            handle_login,
-            [login_username, login_password],
-            [login_status, auth_col, chat_col]
-        )
+        reg_btn.click(show_chat, None, [auth_col, chat_col])
+        login_btn.click(show_chat, None, [auth_col, chat_col])
 
     return app
 
@@ -483,39 +356,6 @@ if __name__ == "__main__":
     except Exception as e:
         print("Error: ffplay not found. Please install FFmpeg.")
         exit(1)
-        
-    # Create database tables if they don't exist
-    try:
-        conn = mysql.connector.connect(**MYSQL_CONFIG)
-        cursor = conn.cursor()
-        
-        # Create users table if not exists
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(255) UNIQUE NOT NULL,
-            password_hash VARCHAR(255) NOT NULL,
-            email VARCHAR(255),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        
-        # Create chat_history table if not exists (matches your existing schema)
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS chat_history (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(255),
-            chat_content TEXT NOT NULL,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        
-        conn.commit()
-    except mysql.connector.Error as err:
-        print(f"Error creating database tables: {err}")
-    finally:
-        cursor.close()
-        conn.close()
         
     app = main_app()
     app.launch()
